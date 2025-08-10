@@ -1,20 +1,57 @@
 import os
+import sys
+import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import threading
 import shutil
 import subprocess
+import atexit
 
 BACKUP_SUFFIX = ".bak"
-PARTOOL_PATH = os.path.join("partool", "ParTool.dll")
-DRY_RUN = False # Define como False para a operação real
+DRY_RUN = False  # Define como False para a operação real
+
+_TEMP_DIR = None
+
+def get_partool_path(log_widget=None):
+    global _TEMP_DIR
+    _TEMP_DIR = tempfile.mkdtemp()
+    temp_partool_dir = os.path.join(_TEMP_DIR, "partool")
+    os.makedirs(temp_partool_dir, exist_ok=True)
+
+    try:
+        if getattr(sys, 'frozen', False):
+            bundled_dir = os.path.join(sys._MEIPASS, "partool")
+            shutil.copytree(bundled_dir, temp_partool_dir, dirs_exist_ok=True)
+        else:
+            shutil.copytree("partool", temp_partool_dir, dirs_exist_ok=True)
+    except Exception as e:
+        raise FileNotFoundError(f"Erro ao localizar ou extrair a pasta 'partool': {e}")
+
+    # Log extra para debug
+    if log_widget:
+        log_message(log_widget, f"[DEBUG] Pasta temporária criada: {_TEMP_DIR}")
+        for root, dirs, files in os.walk(temp_partool_dir):
+            for file in files:
+                log_message(log_widget, f"[DEBUG] Arquivo extraído: {os.path.relpath(os.path.join(root, file), temp_partool_dir)}")
+
+    return os.path.join(temp_partool_dir, "ParTool.dll")
+
+def cleanup_temp_dir():
+    global _TEMP_DIR
+    if _TEMP_DIR and os.path.exists(_TEMP_DIR):
+        try:
+            shutil.rmtree(_TEMP_DIR)
+        except Exception:
+            pass
+
+atexit.register(cleanup_temp_dir)
 
 def log_message(log_widget, message):
     log_widget.insert(tk.END, message + "\n")
     log_widget.see(tk.END)
 
 def safe_copy(src_file, dst_file, log_widget):
-    """Copia um arquivo, criando um backup se o destino já existir."""
     if os.path.exists(dst_file):
         if not os.path.exists(dst_file + BACKUP_SUFFIX):
             try:
@@ -30,16 +67,14 @@ def safe_copy(src_file, dst_file, log_widget):
     except Exception as e:
         log_message(log_widget, f"ERRO ao copiar {src_file} para {dst_file}: {e}")
 
-
 def do_repack(mod_folder, game_folder, log_widget):
     log_message(log_widget, "Iniciando o processo de repack...")
-    
-    # Dicionário para armazenar arquivos por .par
+    PARTOOL_PATH = get_partool_path(log_widget)
+
     par_files_to_add = {}
     temp_mod_base_dir = os.path.join(game_folder, "temp_mod_par")
     
     try:
-        # Percorre a pasta de mods para agrupar arquivos por .par
         for root, dirs, files in os.walk(mod_folder):
             for file in files:
                 mod_file_path = os.path.join(root, file)
@@ -47,7 +82,6 @@ def do_repack(mod_folder, game_folder, log_widget):
                 parts = relative_path.split(os.sep)
 
                 if len(parts) < 2:
-                    # Arquivo não está em uma subpasta, copia diretamente
                     game_dst_path = os.path.join(game_folder, *parts)
                     os.makedirs(os.path.dirname(game_dst_path), exist_ok=True)
                     log_message(log_widget, f"Copiando para pasta descompactada: {relative_path}")
@@ -59,21 +93,17 @@ def do_repack(mod_folder, game_folder, log_widget):
                     if os.path.exists(game_par_path):
                         if par_name not in par_files_to_add:
                             par_files_to_add[par_name] = []
-                        # Adiciona o arquivo e seu caminho relativo dentro do mod
                         par_files_to_add[par_name].append(mod_file_path)
                     else:
-                        # Se não houver .par, copia o arquivo diretamente para a pasta do jogo
                         game_dst_path = os.path.join(game_folder, *parts)
                         os.makedirs(os.path.dirname(game_dst_path), exist_ok=True)
                         log_message(log_widget, f"Copiando para pasta descompactada: {relative_path}")
                         safe_copy(mod_file_path, game_dst_path, log_widget)
 
-        # Processa cada arquivo .par que precisa de modificações
         for par_name, files_to_add in par_files_to_add.items():
             original_par_path = os.path.join(game_folder, par_name + ".par")
             temp_par_path = os.path.join(game_folder, par_name + ".temp.par")
             
-            # Cria um diretório temporário para a estrutura do mod
             temp_mod_dir = os.path.join(temp_mod_base_dir, par_name)
             os.makedirs(temp_mod_dir, exist_ok=True)
             
@@ -83,26 +113,25 @@ def do_repack(mod_folder, game_folder, log_widget):
                 os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
                 safe_copy(mod_file_path, temp_file_path, log_widget)
 
-            # Cria um backup do .par original
             if os.path.exists(original_par_path) and not os.path.exists(original_par_path + BACKUP_SUFFIX):
                 log_message(log_widget, f"Criando backup do .par original: {original_par_path}")
                 shutil.copy2(original_par_path, original_par_path + BACKUP_SUFFIX)
             
-            # Executa o ParTool no modo "add"
             log_message(log_widget, f"Adicionando arquivos de mod para {par_name}.par...")
             if not DRY_RUN:
                 try:
-                    # O comando add agora lê o original, adiciona os arquivos da pasta temporária e salva em um novo .par
-                    result = subprocess.run([
+                    cmd = [
                         "dotnet", PARTOOL_PATH, "add",
                         original_par_path, temp_mod_dir, temp_par_path, "-c", "0"
-                    ], capture_output=True, text=True, check=True)
+                    ]
+                    log_message(log_widget, f"[DEBUG] Comando executado: {' '.join(cmd)}")
+
+                    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                     
                     log_message(log_widget, f"ParTool stdout: {result.stdout.strip()}")
                     if result.stderr:
                         log_message(log_widget, f"ParTool stderr: {result.stderr.strip()}")
 
-                    # Renomeia o novo arquivo .par para o nome original
                     if os.path.exists(temp_par_path):
                         log_message(log_widget, f"Substituindo {original_par_path} com o novo .par...")
                         shutil.move(temp_par_path, original_par_path)
@@ -119,16 +148,14 @@ def do_repack(mod_folder, game_folder, log_widget):
     except Exception as e:
         log_message(log_widget, f"Um erro inesperado ocorreu: {e}")
     finally:
-        # Limpa todos os diretórios temporários
         if os.path.exists(temp_mod_base_dir):
             shutil.rmtree(temp_mod_base_dir)
             log_message(log_widget, f"Diretórios temporários limpos.")
         log_message(log_widget, "Processo de repack concluído!")
     
-# O restante da GUI permanece inalterado
 def start_gui():
     window = tk.Tk()
-    window.title("PAR Repacker")
+    window.title("PAR Repacker (DEBUG)")
 
     tk.Label(window, text="Selecione a Pasta do MOD").grid(row=0, column=0, padx=5, pady=5)
     mod_entry = tk.Entry(window, width=60)
@@ -149,7 +176,6 @@ def start_gui():
         if not mod_path or not game_path:
             messagebox.showerror("Erro", "Por favor, selecione as pastas do MOD e do Jogo.")
             return
-        # Limpa o log antes de iniciar
         log_output.delete("1.0", tk.END)
         threading.Thread(target=do_repack, args=(mod_path, game_path, log_output), daemon=True).start()
 

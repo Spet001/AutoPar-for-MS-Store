@@ -1,6 +1,5 @@
 import os
 import sys
-import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import threading
@@ -11,42 +10,32 @@ import atexit
 BACKUP_SUFFIX = ".bak"
 DRY_RUN = False  # Define como False para a operação real
 
-_TEMP_DIR = None
-
 def get_partool_path(log_widget=None):
-    global _TEMP_DIR
-    _TEMP_DIR = tempfile.mkdtemp()
-    temp_partool_dir = os.path.join(_TEMP_DIR, "partool")
-    os.makedirs(temp_partool_dir, exist_ok=True)
+    partool_dir = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), "partool")
 
-    try:
+    if not os.path.exists(partool_dir):
+        log_message(log_widget, f"Pasta 'partool' não encontrada. Criando em: {partool_dir}")
+        os.makedirs(partool_dir, exist_ok=True)
+        # Se você tiver arquivos do partool embutidos no .exe, eles precisarão ser extraídos aqui.
+        # Por exemplo, se eles estiverem no _MEIPASS:
         if getattr(sys, 'frozen', False):
             bundled_dir = os.path.join(sys._MEIPASS, "partool")
-            shutil.copytree(bundled_dir, temp_partool_dir, dirs_exist_ok=True)
+            if os.path.exists(bundled_dir):
+                shutil.copytree(bundled_dir, partool_dir, dirs_exist_ok=True)
+            else:
+                log_message(log_widget, "Aviso: Pasta 'partool' não encontrada no executável empacotado.")
         else:
-            shutil.copytree("partool", temp_partool_dir, dirs_exist_ok=True)
-    except Exception as e:
-        raise FileNotFoundError(f"Erro ao localizar ou extrair a pasta 'partool': {e}")
+            log_message(log_widget, "Aviso: Executando em modo de script. A pasta 'partool' precisa estar no diretório do script.")
+            # A linha abaixo pode ser necessária se a pasta já existe mas está faltando arquivos
+            # shutil.copytree("partool_source_dir", partool_dir, dirs_exist_ok=True)
 
-    # Log extra para debug
-    if log_widget:
-        log_message(log_widget, f"[DEBUG] Pasta temporária criada: {_TEMP_DIR}")
-        for root, dirs, files in os.walk(temp_partool_dir):
-            for file in files:
-                log_message(log_widget, f"[DEBUG] Arquivo extraído: {os.path.relpath(os.path.join(root, file), temp_partool_dir)}")
+    partool_dll_path = os.path.join(partool_dir, "ParTool.dll")
+    if not os.path.exists(partool_dll_path):
+        raise FileNotFoundError(f"Erro: O arquivo 'ParTool.dll' não foi encontrado em {partool_dir}.")
+    
+    return partool_dll_path
 
-    return os.path.join(temp_partool_dir, "ParTool.dll")
-
-def cleanup_temp_dir():
-    global _TEMP_DIR
-    if _TEMP_DIR and os.path.exists(_TEMP_DIR):
-        try:
-            shutil.rmtree(_TEMP_DIR)
-        except Exception:
-            pass
-
-atexit.register(cleanup_temp_dir)
-
+# As outras funções (log_message, safe_copy, do_repack) permanecem as mesmas.
 def log_message(log_widget, message):
     log_widget.insert(tk.END, message + "\n")
     log_widget.see(tk.END)
@@ -69,7 +58,11 @@ def safe_copy(src_file, dst_file, log_widget):
 
 def do_repack(mod_folder, game_folder, log_widget):
     log_message(log_widget, "Iniciando o processo de repack...")
-    PARTOOL_PATH = get_partool_path(log_widget)
+    try:
+        PARTOOL_PATH = get_partool_path(log_widget)
+    except FileNotFoundError as e:
+        log_message(log_widget, str(e))
+        return
 
     par_files_to_add = {}
     temp_mod_base_dir = os.path.join(game_folder, "temp_mod_par")
@@ -153,23 +146,37 @@ def do_repack(mod_folder, game_folder, log_widget):
             log_message(log_widget, f"Diretórios temporários limpos.")
         log_message(log_widget, "Processo de repack concluído!")
     
+# A função de limpeza de diretório temporário não é mais necessária, pois não usamos mais um diretório temporário global para o partool.
+# atexit.register(cleanup_temp_dir)
+
 def start_gui():
     window = tk.Tk()
-    window.title("PAR Repacker (DEBUG)")
+    window.title("AutoPAR Repacker")
+    window.geometry("800x600")
 
-    tk.Label(window, text="Selecione a Pasta do MOD").grid(row=0, column=0, padx=5, pady=5)
-    mod_entry = tk.Entry(window, width=60)
-    mod_entry.grid(row=0, column=1)
-    tk.Button(window, text="Procurar", command=lambda: mod_entry.insert(0, filedialog.askdirectory())).grid(row=0, column=2)
+    main_frame = tk.Frame(window, padx=10, pady=10)
+    main_frame.pack(fill=tk.BOTH, expand=True)
 
-    tk.Label(window, text="Selecione a Pasta do Jogo").grid(row=1, column=0, padx=5, pady=5)
-    game_entry = tk.Entry(window, width=60)
-    game_entry.grid(row=1, column=1)
-    tk.Button(window, text="Procurar", command=lambda: game_entry.insert(0, filedialog.askdirectory())).grid(row=1, column=2)
+    # Frame para as entradas
+    input_frame = tk.LabelFrame(main_frame, text="Configurações", padx=10, pady=10)
+    input_frame.pack(fill=tk.X)
 
-    log_output = scrolledtext.ScrolledText(window, width=100, height=30)
-    log_output.grid(row=3, column=0, columnspan=3, padx=10, pady=10)
+    tk.Label(input_frame, text="MOD Folder:", anchor="w").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+    mod_entry = tk.Entry(input_frame)
+    mod_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+    tk.Button(input_frame, text="Procurar", command=lambda: mod_entry.insert(0, filedialog.askdirectory())).grid(row=0, column=2, padx=5, pady=5)
 
+    tk.Label(input_frame, text="Game Folder:", anchor="w").grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+    game_entry = tk.Entry(input_frame)
+    game_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+    tk.Button(input_frame, text="Procurar", command=lambda: game_entry.insert(0, filedialog.askdirectory())).grid(row=1, column=2, padx=5, pady=5)
+    
+    input_frame.grid_columnconfigure(1, weight=1)
+
+    # Botão de Iniciar
+    button_frame = tk.Frame(main_frame, pady=10)
+    button_frame.pack(fill=tk.X)
+    
     def on_start():
         mod_path = mod_entry.get()
         game_path = game_entry.get()
@@ -179,7 +186,13 @@ def start_gui():
         log_output.delete("1.0", tk.END)
         threading.Thread(target=do_repack, args=(mod_path, game_path, log_output), daemon=True).start()
 
-    tk.Button(window, text="Iniciar", command=on_start).grid(row=2, column=1, pady=10)
+    tk.Button(button_frame, text="Start Repack", command=on_start).pack(fill=tk.X)
+    
+    # Área de Log
+    log_frame = tk.LabelFrame(main_frame, text="Log", padx=5, pady=5)
+    log_frame.pack(fill=tk.BOTH, expand=True)
+    log_output = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
+    log_output.pack(fill=tk.BOTH, expand=True)
 
     window.mainloop()
 
